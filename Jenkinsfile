@@ -2,90 +2,84 @@ pipeline {
     agent any
 
     environment {
+        // Update with your Jenkins credentials IDs
+        GIT_REPO = "https://github.com/akhiLeeesh/3-tire.git"
         EC2_USER = "ubuntu"
-        EC2_HOST = "ec2-13-201-222-161.ap-south-1.compute.amazonaws.com"
-        EC2_KEY = "web.pem" // This should be stored in Jenkins credentials
-        FRONTEND_PATH = "frontend"
-        BACKEND_PATH = "backend"
+        EC2_HOST = "13.201.222.161"
+        SSH_CREDENTIALS_ID = "ec2-ssh-key" // Jenkins SSH key credential ID
+        FRONTEND_DIR = "frontend"
+        BACKEND_DIR = "backend"
+        FRONTEND_BUILD_DIR = "build" // For React; change if Angular
+        BACKEND_JAR = "target/backend-0.0.1-SNAPSHOT.jar" // Update if jar name is different
+        REMOTE_FRONTEND_PATH = "/var/www/html"
+        REMOTE_BACKEND_PATH = "/home/ubuntu/backend"
     }
 
     stages {
 
-        stage('Check Workspace') {
+        stage('Checkout') {
             steps {
-                sh 'pwd'
-                sh 'ls -l'
+                git branch: 'main', url: "${GIT_REPO}"
             }
         }
 
         stage('Build Frontend') {
-            agent {
-                docker { image 'node:18' }
-            }
             steps {
-                dir("${FRONTEND_PATH}") {
-                    sh 'npm install'
-                    sh 'npm run build'
+                dir("${FRONTEND_DIR}") {
+                    sh '''
+                        echo "Building frontend..."
+                        npm install
+                        npm run build
+                    '''
                 }
             }
         }
 
         stage('Build Backend') {
-            agent {
-                docker { image 'maven:3.8.8-openjdk-17' }
-            }
             steps {
-                dir("${BACKEND_PATH}") {
-                    sh 'mvn clean package -DskipTests'
+                dir("${BACKEND_DIR}") {
+                    sh '''
+                        echo "Building backend..."
+                        mvn clean package -DskipTests
+                    '''
                 }
             }
         }
 
         stage('Deploy to EC2') {
             steps {
-                withCredentials([sshUserPrivateKey(credentialsId: 'ec2-key', keyFileVariable: 'EC2_KEYFILE')]) {
-                    
-                    // Upload Frontend build
+                sshagent([SSH_CREDENTIALS_ID]) {
+                    // Upload frontend build
                     sh """
-                        scp -i ${EC2_KEYFILE} -r ${FRONTEND_PATH}/build/* ${EC2_USER}@${EC2_HOST}:/home/ubuntu/frontend/
+                        echo "Uploading frontend to EC2..."
+                        scp -o StrictHostKeyChecking=no -r ${FRONTEND_DIR}/${FRONTEND_BUILD_DIR}/* ${EC2_USER}@${EC2_HOST}:${REMOTE_FRONTEND_PATH}
                     """
 
-                    // Upload Backend JAR
+                    // Upload backend jar
                     sh """
-                        scp -i ${EC2_KEYFILE} ${BACKEND_PATH}/target/*.jar ${EC2_USER}@${EC2_HOST}:/home/ubuntu/backend/app.jar
+                        echo "Uploading backend jar to EC2..."
+                        scp -o StrictHostKeyChecking=no ${BACKEND_DIR}/${BACKEND_JAR} ${EC2_USER}@${EC2_HOST}:${REMOTE_BACKEND_PATH}/app.jar
                     """
 
-                    // Configure & restart services on EC2
+                    // Restart backend
                     sh """
-                        ssh -i ${EC2_KEYFILE} ${EC2_USER}@${EC2_HOST} << 'EOF'
-                            # Install Nginx if not installed
-                            sudo apt update
-                            sudo apt install -y nginx
-
-                            # Nginx config
-                            sudo bash -c 'cat > /etc/nginx/sites-available/default <<EOL
-server {
-    listen 80;
-    root /home/ubuntu/frontend;
-    index index.html;
-    location / {
-        try_files \$uri /index.html;
-    }
-    location /api/ {
-        proxy_pass http://localhost:8081/;
-    }
-}
-EOL'
-
-                            sudo nginx -t
-                            sudo systemctl restart nginx
-
-                            # Start backend
-                            nohup java -jar /home/ubuntu/backend/app.jar > backend.log 2>&1 &
-                        EOF
+                        echo "Restarting backend on EC2..."
+                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} "
+                            pkill -f 'java -jar' || true
+                            nohup java -jar ${REMOTE_BACKEND_PATH}/app.jar > backend.log 2>&1 &
+                        "
                     """
                 }
             }
+        }
+    }
+
+    post {
+        success {
+            echo "Deployment completed successfully!"
+        }
+        failure {
+            echo "Deployment failed!"
         }
     }
 }
